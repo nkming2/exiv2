@@ -34,7 +34,9 @@
 // + standard includes
 #include <array>
 #include <cmath>
+#include <codecvt>
 #include <iostream>
+#include <map>
 #include <string>
 // *****************************************************************************
 // class member definitions
@@ -496,7 +498,7 @@ static bool ignoreList(Exiv2::DataBuf& buf) {
  */
 static bool dataIgnoreList(Exiv2::DataBuf& buf) {
   const char ignoreList[8][5] = {
-      "moov", "mdia", "minf", "dinf", "alis", "stbl", "cmov", "meta",
+      "moov", "mdia", "minf", "dinf", "alis", "stbl", "cmov",
   };
 
   for (auto i : ignoreList)
@@ -565,6 +567,47 @@ class QTFixedPoint {
 [[maybe_unused]] std::ostream& operator<<(std::ostream& os, const QTFixedPoint& obj) {
   return os << obj.toDouble();
 }
+
+/*!
+  @brief Parse the content of the metadata box ("meta")
+  @see https://developer.apple.com/documentation/quicktime-file-format/metadata_atom
+ */
+class MetadataBoxDecoder {
+ public:
+  struct Result {
+    std::map<std::string, std::string> keyValues;
+  };
+
+  Result operator()(const Exiv2::DataBuf& buf);
+
+ private:
+  /*!
+    @brief Parse the content of the metadata item keys atom ("keys")
+    @see https://developer.apple.com/documentation/quicktime-file-format/metadata_item_keys_atom
+  */
+  void readKeysBox(const Exiv2::DataBuf& buf);
+
+  /*!
+    @brief Parse the content of the metadata item list atom ("ilst")
+    @see https://developer.apple.com/documentation/quicktime-file-format/metadata_item_list_atom
+  */
+  void readIlstBox(const Exiv2::DataBuf& buf);
+
+  /*!
+    @brief Parse the content of the metadata item atom
+    @see https://developer.apple.com/documentation/quicktime-file-format/metadata_item_atom
+  */
+  std::string readDataFromMetadataItemBox(const Exiv2::DataBuf& buf);
+
+  /*!
+    @brief Parse the content of the value atom
+    @see https://developer.apple.com/documentation/quicktime-file-format/value_atom
+  */
+  std::string readValueBox(const Exiv2::DataBuf& buf);
+
+  std::map<int, std::string> keys_;
+  std::map<int, std::string> ilst_;
+};
 
 /*!
   @brief Parse the content of the movie header box ("mvhd")
@@ -658,6 +701,7 @@ class TrackHeaderBoxDecoder {
   const uint32_t timeScale_;
 };
 
+void populateXmp(Exiv2::XmpData& outXmp, const MetadataBoxDecoder::Result& result);
 void populateXmp(Exiv2::XmpData& outXmp, const MovieHeaderBoxDecoder::Result& result);
 void populateXmp(Exiv2::XmpData& outXmp, const int currentStream, const TrackHeaderBoxDecoder::Result& result);
 
@@ -869,6 +913,14 @@ void QuickTimeVideo::tagDecoder(Exiv2::DataBuf& buf, size_t size, size_t recursi
     io_->readOrThrow(buf.data(), 4);
     io_->readOrThrow(buf.data(), 4);
     xmpData_["Xmp.audio.Balance"] = buf.read_uint16(0, bigEndian);
+  }
+
+  else if (equalsQTimeTag(buf, "meta")) {
+    DataBuf metaBuf(size);
+    io_->readOrThrow(metaBuf.data(), size);
+    MetadataBoxDecoder decoder;
+    const auto result = decoder(metaBuf);
+    populateXmp(xmpData_, result);
   }
 
   else {
@@ -1662,6 +1714,247 @@ bool isQTimeType(BasicIo& iIo, bool advance) {
 
 namespace {
 
+MetadataBoxDecoder::Result MetadataBoxDecoder::operator()(const Exiv2::DataBuf& buf) {
+  using namespace Exiv2;
+  // check if this is a full box (iso) or regular box (apple)
+  const bool is_full_box = !equalsQTimeTag(buf, "hdlr", 4);
+  size_t bufI = 0;
+  if (is_full_box) {
+    // version (1 byte) + flags (3 bytes)
+    bufI += 4;
+  }
+  while (bufI < buf.size()) {
+    ENFORCE_WITH_LOG(buf.size() - bufI >= 8, ErrorCode::kerCorruptedMetadata);
+    size_t boxI = 0;
+    const auto boxSize = buf.read_uint32(bufI, bigEndian);
+    ENFORCE_WITH_LOG(buf.size() - bufI >= boxSize, ErrorCode::kerCorruptedMetadata);
+    boxI += 4;
+    if (equalsQTimeTag(buf, "hdlr", bufI + boxI)) {
+      // not interested
+    } else if (equalsQTimeTag(buf, "keys", bufI + boxI)) {
+      boxI += 4;
+      ENFORCE_WITH_LOG(boxSize >= boxI, ErrorCode::kerCorruptedMetadata);
+      DataBuf childBuf(boxSize - boxI);
+      std::copy_n(buf.begin() + bufI + boxI, childBuf.size(), childBuf.begin());
+      readKeysBox(childBuf);
+    } else if (equalsQTimeTag(buf, "ilst", bufI + boxI)) {
+      boxI += 4;
+      ENFORCE_WITH_LOG(boxSize >= boxI, ErrorCode::kerCorruptedMetadata);
+      DataBuf childBuf(boxSize - boxI);
+      std::copy_n(buf.begin() + bufI + boxI, childBuf.size(), childBuf.begin());
+      readIlstBox(childBuf);
+    }
+    bufI += boxSize;
+  }
+
+  std::map<std::string, std::string> result;
+  for (const auto& e : ilst_) {
+    if (keys_.contains(e.first)) {
+      result[keys_[e.first]] = e.second;
+    } else {
+      const char key[4] = {
+          static_cast<char>((e.first >> 24) & 0xFF),
+          static_cast<char>((e.first >> 16) & 0xFF),
+          static_cast<char>((e.first >> 8) & 0xFF),
+          static_cast<char>(e.first & 0xFF),
+      };
+      result[key] = e.second;
+    }
+  }
+  return {std::move(result)};
+}
+
+void MetadataBoxDecoder::readKeysBox(const Exiv2::DataBuf& buf) {
+  using namespace Exiv2;
+  ENFORCE_WITH_LOG(buf.size() >= 8, ErrorCode::kerCorruptedMetadata);
+  std::map<int, std::string> result;
+  size_t bufI = 0;
+  // no use
+  // const auto versionFlags = buf.read_uint32(bufI, bigEndian);
+  bufI += 4;
+  const auto entryCount = buf.read_uint32(bufI, bigEndian);
+#ifdef EXIV2_DEBUG_MESSAGES
+  std::cerr << "(meta) Found " << entryCount << " keys:\n";
+#endif
+  bufI += 4;
+  size_t itemI = 0;
+  while (bufI < buf.size() && itemI < entryCount) {
+    ENFORCE_WITH_LOG(buf.size() - bufI >= 4, ErrorCode::kerCorruptedMetadata);
+    const auto itemSize = buf.read_uint32(bufI, bigEndian);
+    ENFORCE_WITH_LOG(itemSize >= 8, ErrorCode::kerCorruptedMetadata);
+    ENFORCE_WITH_LOG(buf.size() - bufI >= itemSize, ErrorCode::kerCorruptedMetadata);
+    bufI += 4;
+    std::string itemNamespace(4, '\0');
+    std::copy_n(buf.begin() + bufI, 4, itemNamespace.data());
+    bufI += 4;
+    const auto valueSize = itemSize - 8;
+    std::string itemValue(valueSize, '\0');
+    std::copy_n(buf.begin() + bufI, valueSize, itemValue.data());
+    bufI += valueSize;
+
+    // key index starts with 1 not 0
+    result[++itemI] = itemNamespace + "." + itemValue;
+#ifdef EXIV2_DEBUG_MESSAGES
+    std::cerr << "  - " << itemNamespace << "." << itemValue << "\n";
+#endif
+  }
+  keys_ = std::move(result);
+}
+
+void MetadataBoxDecoder::readIlstBox(const Exiv2::DataBuf& buf) {
+  using namespace Exiv2;
+  std::map<int, std::string> result;
+  size_t bufI = 0;
+  while (bufI < buf.size()) {
+    ENFORCE_WITH_LOG(buf.size() - bufI >= 4, ErrorCode::kerCorruptedMetadata);
+    const auto itemSize = buf.read_uint32(bufI, bigEndian);
+    ENFORCE_WITH_LOG(itemSize >= 8, ErrorCode::kerCorruptedMetadata);
+    ENFORCE_WITH_LOG(buf.size() - bufI >= itemSize, ErrorCode::kerCorruptedMetadata);
+    bufI += 4;
+    const auto itemType = buf.read_uint32(bufI, bigEndian);
+    bufI += 4;
+    // metadata item box may contain multiple boxes
+    const auto childSize = itemSize - 8;
+    DataBuf childBuf(childSize);
+    std::copy_n(buf.begin() + bufI, childBuf.size(), childBuf.begin());
+    bufI += childSize;
+    const auto data = readDataFromMetadataItemBox(childBuf);
+    result[itemType] = data;
+  }
+  ilst_ = std::move(result);
+
+#ifdef EXIV2_DEBUG_MESSAGES
+  std::cerr << "(meta) Found " << ilst_.size() << " data items:\n";
+  for (const auto& e : ilst_) {
+    std::cerr << "  " << e.first << ". " << e.second << "\n";
+  }
+#endif
+}
+
+std::string MetadataBoxDecoder::readDataFromMetadataItemBox(const Exiv2::DataBuf& buf) {
+  using namespace Exiv2;
+  std::string result;
+  size_t bufI = 0;
+  while (bufI < buf.size()) {
+    ENFORCE_WITH_LOG(buf.size() - bufI >= 4, ErrorCode::kerCorruptedMetadata);
+    size_t boxI = 0;
+    const auto boxSize = buf.read_uint32(bufI, bigEndian);
+    ENFORCE_WITH_LOG(buf.size() - bufI >= boxSize, ErrorCode::kerCorruptedMetadata);
+    boxI += 4;
+    if (equalsQTimeTag(buf, "itif", bufI + boxI)) {
+      // not interested
+#ifdef EXIV2_DEBUG_MESSAGES
+      std::cerr << "(meta) Ignored itif box: not implemented\n";
+#endif
+    } else if (equalsQTimeTag(buf, "name", bufI + boxI)) {
+      // not interested
+#ifdef EXIV2_DEBUG_MESSAGES
+      std::cerr << "(meta) Ignored name box: not implemented\n";
+#endif
+    } else if (equalsQTimeTag(buf, "data", bufI + boxI)) {
+      ENFORCE_WITH_LOG(boxSize >= 8, ErrorCode::kerCorruptedMetadata);
+      boxI += 4;
+      DataBuf childBuf(boxSize - boxI);
+      std::copy_n(buf.begin() + bufI + boxI, childBuf.size(), childBuf.begin());
+      result = readValueBox(childBuf);
+    }
+    bufI += boxSize;
+  }
+  return result;
+}
+
+std::string MetadataBoxDecoder::readValueBox(const Exiv2::DataBuf& buf) {
+  using namespace Exiv2;
+  ENFORCE_WITH_LOG(buf.size() >= 8, ErrorCode::kerCorruptedMetadata);
+  size_t bufI = 0;
+  const auto type = buf.read_uint32(bufI, bigEndian);
+  bufI += 4;
+  // no idea how to handle locale
+  // const auto locale = buf.read_uint32(bufI, bigEndian);
+  bufI += 4;
+  if (type == 1) {
+    // UTF-8
+    std::string value(buf.size() - bufI, '\0');
+    std::copy_n(buf.begin() + bufI, buf.size() - bufI, value.data());
+    return value;
+  } else if (type == 2) {
+    // UTF-16
+    const auto valueSize = buf.size() - bufI;
+    // size must be even
+    ENFORCE_WITH_LOG(valueSize % 2 == 0, ErrorCode::kerCorruptedMetadata);
+    std::u16string value;
+    // can't use copy_n due to endianness
+    for (auto it = buf.begin() + bufI; it != buf.end(); it += 2) {
+      const char16_t c = (*it << 8) | *(it + 1);
+      value.push_back(c);
+    }
+    // to make thing easier, we convert it back to utf8
+    std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> convert;
+    return convert.to_bytes(value);
+  } else if (type == 23) {
+    // float32
+    ENFORCE_WITH_LOG(buf.size() - bufI == 4, ErrorCode::kerCorruptedMetadata);
+    // we can't memcpy buf directly due to endianness of float
+    const auto value = buf.read_uint32(bufI, bigEndian);
+    float valueF;
+    memcpy(&valueF, &value, 4);
+    return std::to_string(valueF);
+  } else if (type == 24) {
+    // float64
+    ENFORCE_WITH_LOG(buf.size() - bufI == 8, ErrorCode::kerCorruptedMetadata);
+    // we can't memcpy buf directly due to endianness of double
+    const auto value = buf.read_uint64(bufI, bigEndian);
+    double valueF;
+    memcpy(&valueF, &value, 8);
+    return std::to_string(valueF);
+  } else if (type == 65) {
+    // int8
+    ENFORCE_WITH_LOG(buf.size() - bufI == 1, ErrorCode::kerCorruptedMetadata);
+    const auto value = (int8_t)buf.read_uint8(bufI);
+    return std::to_string(value);
+  } else if (type == 66) {
+    // int16
+    ENFORCE_WITH_LOG(buf.size() - bufI == 2, ErrorCode::kerCorruptedMetadata);
+    const auto value = (int16_t)buf.read_uint16(bufI, bigEndian);
+    return std::to_string(value);
+  } else if (type == 67) {
+    // int32
+    ENFORCE_WITH_LOG(buf.size() - bufI == 4, ErrorCode::kerCorruptedMetadata);
+    const auto value = (int32_t)buf.read_uint32(bufI, bigEndian);
+    return std::to_string(value);
+  } else if (type == 74) {
+    // int64
+    ENFORCE_WITH_LOG(buf.size() - bufI == 8, ErrorCode::kerCorruptedMetadata);
+    const auto value = (int64_t)buf.read_uint64(bufI, bigEndian);
+    return std::to_string(value);
+  } else if (type == 75) {
+    // uint8
+    ENFORCE_WITH_LOG(buf.size() - bufI == 1, ErrorCode::kerCorruptedMetadata);
+    const auto value = buf.read_uint8(bufI);
+    return std::to_string(value);
+  } else if (type == 76) {
+    // uint16
+    ENFORCE_WITH_LOG(buf.size() - bufI == 2, ErrorCode::kerCorruptedMetadata);
+    const auto value = buf.read_uint16(bufI, bigEndian);
+    return std::to_string(value);
+  } else if (type == 77) {
+    // uint32
+    ENFORCE_WITH_LOG(buf.size() - bufI == 4, ErrorCode::kerCorruptedMetadata);
+    const auto value = buf.read_uint32(bufI, bigEndian);
+    return std::to_string(value);
+  } else if (type == 78) {
+    // uint64
+    ENFORCE_WITH_LOG(buf.size() - bufI == 8, ErrorCode::kerCorruptedMetadata);
+    const auto value = buf.read_uint64(bufI, bigEndian);
+    return std::to_string(value);
+  } else {
+#ifdef EXIV2_DEBUG_MESSAGES
+    std::cerr << "(meta) Unable to handle value box with type: " << type << "\n";
+#endif
+    return "";
+  }
+}
+
 MovieHeaderBoxDecoder::Result MovieHeaderBoxDecoder::operator()(const Exiv2::DataBuf& buf) {
   using namespace Exiv2;
   size_t bufI = 0;
@@ -1872,6 +2165,12 @@ void populateXmp(Exiv2::XmpData& outXmp, const int currentStream, const TrackHea
     outXmp["Xmp.audio.TrackDuration"] = (uint32_t)(result.duration.seconds() * 1000);
     outXmp["Xmp.audio.TrackLayer"] = result.layer;
     outXmp["Xmp.audio.TrackVolume"] = result.volume.toDouble() * 100;
+  }
+}
+
+void populateXmp(Exiv2::XmpData& outXmp, const MetadataBoxDecoder::Result& result) {
+  for (auto e : result.keyValues) {
+    outXmp["Xmp.video.np.meta." + e.first] = e.second;
   }
 }
 
