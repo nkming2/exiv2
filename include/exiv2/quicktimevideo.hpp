@@ -101,12 +101,6 @@ class EXIV2API QuickTimeVideo : public Image {
    */
   void videoHeaderDecoder(size_t size);
   /*!
-    @brief Interpret Movie Header Tag, and save it
-        in the respective XMP container.
-    @param size Size of the data block used to store Tag Information.
-   */
-  void movieHeaderDecoder(size_t size);
-  /*!
     @brief Interpret Track Header Tag, and save it
         in the respective XMP container.
     @param size Size of the data block used to store Tag Information.

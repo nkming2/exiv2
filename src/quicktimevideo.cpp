@@ -34,6 +34,7 @@
 // + standard includes
 #include <array>
 #include <cmath>
+#include <iostream>
 #include <string>
 // *****************************************************************************
 // class member definitions
@@ -433,22 +434,6 @@ static constexpr TagDetails whiteBalance[] = {
     {0, "Auto"}, {1, "Daylight"}, {2, "Shade"}, {3, "Fluorescent"}, {4, "Tungsten"}, {5, "Manual"},
 };
 
-enum movieHeaderTags {
-  MovieHeaderVersion,
-  CreateDate,
-  ModifyDate,
-  TimeScale,
-  Duration,
-  PreferredRate,
-  PreferredVolume,
-  PreviewTime = 18,
-  PreviewDuration,
-  PosterTime,
-  SelectionTime,
-  SelectionDuration,
-  CurrentTime,
-  NextTrackID
-};
 enum trackHeaderTags {
   TrackHeaderVersion,
   TrackCreateDate,
@@ -487,10 +472,11 @@ enum audioDescTags { AudioFormat, AudioVendorID = 4, AudioChannels, AudioSampleR
       particular string (ignores case while comparing).
   @param buf Data buffer that will contain Tag to compare
   @param str char* Pointer to string
+  @param offset size_t Offset in buf
   @return Returns true if the buffer value is equal to string.
  */
-static bool equalsQTimeTag(Exiv2::DataBuf& buf, const char str[5]) {
-  return std::equal(buf.begin(), buf.begin() + 4, str,
+static bool equalsQTimeTag(const Exiv2::DataBuf& buf, const char str[5], const size_t offset = 0) {
+  return std::equal(buf.begin() + offset, buf.begin() + offset + 4, str,
                     [](auto b, auto s) { return std::tolower(b) == std::tolower(s); });
 }
 
@@ -531,6 +517,129 @@ static bool dataIgnoreList(Exiv2::DataBuf& buf) {
   return false;
 }
 }  // namespace Exiv2::Internal
+
+namespace {
+
+/*!
+  @brief Time value in time scale units.
+  */
+class QTScaledTime {
+ public:
+  QTScaledTime(const int32_t raw, const uint32_t timeScale) : raw_(raw), timeScale_(timeScale) {
+  }
+
+  double seconds() const {
+    return (double)raw_ / timeScale_;
+  }
+
+ private:
+  uint32_t raw_;
+  uint32_t timeScale_;
+};
+
+[[maybe_unused]] std::ostream& operator<<(std::ostream& os, const QTScaledTime& obj) {
+  return os << obj.seconds() << "s";
+}
+
+/*!
+  @brief Fixed point value.
+  */
+class QTFixedPoint {
+ public:
+  QTFixedPoint() : QTFixedPoint(0, 0) {
+  }
+
+  static QTFixedPoint fromQ88(const int16_t value) {
+    return fromQ1616(static_cast<int32_t>(value) << 8);
+  }
+
+  static QTFixedPoint fromQ1616(const int32_t value) {
+    return QTFixedPoint(value, value / 65536.0);
+  }
+
+  static QTFixedPoint fromQ230(const int32_t value) {
+    return QTFixedPoint(value, value / 1073741824.0);
+  }
+
+  double toDouble() const {
+    return fp_;
+  }
+
+ private:
+  QTFixedPoint(const int32_t raw, const double fp) : raw_(raw), fp_(fp) {
+  }
+
+  const int32_t raw_;
+  const double fp_;
+};
+
+[[maybe_unused]] std::ostream& operator<<(std::ostream& os, const QTFixedPoint& obj) {
+  return os << obj.toDouble();
+}
+
+/*!
+  @brief Parse the content of the movie header box ("mvhd")
+  @see https://developer.apple.com/documentation/quicktime-file-format/movie_header_atom
+ */
+class MovieHeaderBoxDecoder {
+ public:
+  struct Result {
+    // The version of this movie header atom.
+    const uint8_t version;
+    // Specifies the creation calendar date and time for the movie atom. (in seconds since midnight, January 1, 1904)
+    const uint32_t creationTime;
+    // Specifies the calendar date and time of the last change to the movie atom. (in seconds since midnight, January 1,
+    // 1904)
+    const uint32_t modificationTime;
+    // A time value that indicates the time scale for this movie. The time value represents the number of time units
+    // that pass per second in its time coordinate system. A time coordinate system that measures time in sixtieths of a
+    // second, for example, has a time scale of 60.
+    const uint32_t timeScale;
+    // A time value that indicates the duration of the movie. Note that this property is derived from the movie’s
+    // tracks. The value of this field corresponds to the duration of the longest track in the movie.
+    const QTScaledTime duration;
+    // Specifies the rate at which to play this movie. A value of 1.0 indicates normal rate.
+    const QTFixedPoint preferredRate;
+    // Specifies how loud to play this movie’s sound. A value of 1.0 indicates full volume.
+    const QTFixedPoint preferredVolume;
+    // The matrix structure associated with this movie.
+    const std::array<QTFixedPoint, 9> matrixStructure;
+    // The time value in the movie at which the preview begins.
+    const uint32_t previewTime;
+    // The duration of the movie preview.
+    const QTScaledTime previewDuration;
+    // The time value of the time of the movie poster.
+    const uint32_t posterTime;
+    // The time value for the start time of the current selection.
+    const uint32_t selectionTime;
+    // The duration of the current selection.
+    const QTScaledTime selectionDuration;
+    // The time value for current time position within the movie.
+    const uint32_t currentTime;
+    // Indicates a value to use for the track ID number of the next track added to this movie. Note that 0 is not a
+    // valid track ID value.
+    const uint32_t nextTrackId;
+  };
+
+  Result operator()(const Exiv2::DataBuf& buf);
+};
+
+void populateXmp(Exiv2::XmpData& outXmp, const MovieHeaderBoxDecoder::Result& result);
+
+}  // namespace
+
+// provide more debug info during development/bug report
+#ifdef EXIV2_DEBUG_MESSAGES
+#define ENFORCE_WITH_LOG(condition, err_code...)                                                                   \
+  do {                                                                                                             \
+    if (!(condition)) {                                                                                            \
+      std::cerr << "Failed condition (" << #condition << ") in " << __FILE_NAME__ << ":" << __LINE__ << std::endl; \
+      enforce(false, err_code);                                                                                    \
+    }                                                                                                              \
+  } while (false)
+#else
+#define ENFORCE_WITH_LOG enforce
+#endif
 
 namespace Exiv2 {
 
@@ -646,8 +755,14 @@ void QuickTimeVideo::tagDecoder(Exiv2::DataBuf& buf, size_t size, size_t recursi
   else if (equalsQTimeTag(buf, "trak"))
     setMediaStream();
 
-  else if (equalsQTimeTag(buf, "mvhd"))
-    movieHeaderDecoder(size);
+  else if (equalsQTimeTag(buf, "mvhd")) {
+    DataBuf mvhdBuf(size);
+    io_->readOrThrow(mvhdBuf.data(), size);
+    MovieHeaderBoxDecoder decoder;
+    const auto result = decoder(mvhdBuf);
+    populateXmp(xmpData_, result);
+    timeScale_ = result.timeScale;
+  }
 
   else if (equalsQTimeTag(buf, "tkhd"))
     trackHeaderDecoder(size);
@@ -1533,72 +1648,6 @@ void QuickTimeVideo::trackHeaderDecoder(size_t size) {
   io_->readOrThrow(buf.data(), size % 4);
 }  // QuickTimeVideo::trackHeaderDecoder
 
-void QuickTimeVideo::movieHeaderDecoder(size_t size) {
-  DataBuf buf(5);
-  std::memset(buf.data(), 0x0, buf.size());
-  buf.data()[4] = '\0';
-
-  for (int i = 0; size / 4 != 0; size -= 4, i++) {
-    io_->readOrThrow(buf.data(), 4);
-
-    switch (i) {
-      case MovieHeaderVersion:
-        xmpData_["Xmp.video.MovieHeaderVersion"] = static_cast<int>(buf.read_uint8(0));
-        break;
-      case CreateDate:
-        // A 32-bit integer that specifies (in seconds since midnight, January 1, 1904) when the movie atom was created.
-        xmpData_["Xmp.video.DateUTC"] = buf.read_uint32(0, bigEndian);
-        break;
-      case ModifyDate:
-        // A 32-bit integer that specifies (in seconds since midnight, January 1, 1904) when the movie atom was created.
-        xmpData_["Xmp.video.ModificationDate"] = buf.read_uint32(0, bigEndian);
-        break;
-      case TimeScale:
-        xmpData_["Xmp.video.TimeScale"] = buf.read_uint32(0, bigEndian);
-        timeScale_ = buf.read_uint32(0, bigEndian);
-        if (timeScale_ <= 0)
-          timeScale_ = 1;
-        break;
-      case Duration:
-        if (timeScale_ != 0) {  // To prevent division by zero
-          xmpData_["Xmp.video.Duration"] = buf.read_uint32(0, bigEndian) * 1000 / timeScale_;
-        }
-        break;
-      case PreferredRate:
-        xmpData_["Xmp.video.PreferredRate"] =
-            buf.read_uint16(0, bigEndian) + ((buf.data()[2] * 256 + buf.data()[3]) * 0.01);
-        break;
-      case PreferredVolume:
-        xmpData_["Xmp.video.PreferredVolume"] = (static_cast<int>(buf.read_uint8(0)) + (buf.data()[2] * 0.1)) * 100;
-        break;
-      case PreviewTime:
-        xmpData_["Xmp.video.PreviewTime"] = buf.read_uint32(0, bigEndian);
-        break;
-      case PreviewDuration:
-        xmpData_["Xmp.video.PreviewDuration"] = buf.read_uint32(0, bigEndian);
-        break;
-      case PosterTime:
-        xmpData_["Xmp.video.PosterTime"] = buf.read_uint32(0, bigEndian);
-        break;
-      case SelectionTime:
-        xmpData_["Xmp.video.SelectionTime"] = buf.read_uint32(0, bigEndian);
-        break;
-      case SelectionDuration:
-        xmpData_["Xmp.video.SelectionDuration"] = buf.read_uint32(0, bigEndian);
-        break;
-      case CurrentTime:
-        xmpData_["Xmp.video.CurrentTime"] = buf.read_uint32(0, bigEndian);
-        break;
-      case NextTrackID:
-        xmpData_["Xmp.video.NextTrackID"] = buf.read_uint32(0, bigEndian);
-        break;
-      default:
-        break;
-    }
-  }
-  io_->readOrThrow(buf.data(), size % 4);
-}  // QuickTimeVideo::movieHeaderDecoder
-
 Image::UniquePtr newQTimeInstance(BasicIo::UniquePtr io, bool /*create*/) {
   auto image = std::make_unique<QuickTimeVideo>(std::move(io));
   if (!image->good()) {
@@ -1639,3 +1688,115 @@ bool isQTimeType(BasicIo& iIo, bool advance) {
 }
 
 }  // namespace Exiv2
+
+namespace {
+
+MovieHeaderBoxDecoder::Result MovieHeaderBoxDecoder::operator()(const Exiv2::DataBuf& buf) {
+  using namespace Exiv2;
+  size_t bufI = 0;
+  ENFORCE_WITH_LOG(buf.size() >= 100, ErrorCode::kerCorruptedMetadata);
+  const auto version = buf.read_uint8(bufI);
+  // ignore flags(3 bytes)
+  bufI += 4;
+  const auto creationTime = buf.read_uint32(bufI, bigEndian);
+  bufI += 4;
+  const auto modificationTime = buf.read_uint32(bufI, bigEndian);
+  bufI += 4;
+  auto timeScale = buf.read_uint32(bufI, bigEndian);
+  bufI += 4;
+  if (timeScale <= 0) {
+    timeScale = 1;
+  }
+  const auto duration = QTScaledTime(buf.read_uint32(bufI, bigEndian), timeScale);
+  bufI += 4;
+  const auto preferredRate = QTFixedPoint::fromQ1616(buf.read_uint32(bufI, bigEndian));
+  bufI += 4;
+  const auto preferredVolume = QTFixedPoint::fromQ88(buf.read_uint16(bufI, bigEndian));
+  bufI += 2;
+  // Ten bytes reserved for use by Apple.
+  bufI += 10;
+  const std::array<QTFixedPoint, 9> matrixStructure = {
+      QTFixedPoint::fromQ1616(buf.read_uint32(bufI, bigEndian)),
+      QTFixedPoint::fromQ1616(buf.read_uint32(bufI += 4, bigEndian)),
+      QTFixedPoint::fromQ230(buf.read_uint32(bufI += 4, bigEndian)),
+      QTFixedPoint::fromQ1616(buf.read_uint32(bufI += 4, bigEndian)),
+      QTFixedPoint::fromQ1616(buf.read_uint32(bufI += 4, bigEndian)),
+      QTFixedPoint::fromQ230(buf.read_uint32(bufI += 4, bigEndian)),
+      QTFixedPoint::fromQ1616(buf.read_uint32(bufI += 4, bigEndian)),
+      QTFixedPoint::fromQ1616(buf.read_uint32(bufI += 4, bigEndian)),
+      QTFixedPoint::fromQ230(buf.read_uint32(bufI += 4, bigEndian)),
+  };
+  bufI += 4;
+  const auto previewTime = buf.read_uint32(bufI, bigEndian);
+  bufI += 4;
+  const auto previewDuration = QTScaledTime(buf.read_uint32(bufI, bigEndian), timeScale);
+  bufI += 4;
+  const auto posterTime = buf.read_uint32(bufI, bigEndian);
+  bufI += 4;
+  const auto selectionTime = buf.read_uint32(bufI, bigEndian);
+  bufI += 4;
+  const auto selectionDuration = QTScaledTime(buf.read_uint32(bufI, bigEndian), timeScale);
+  bufI += 4;
+  const auto currentTime = buf.read_uint32(bufI, bigEndian);
+  bufI += 4;
+  const auto nextTrackId = buf.read_uint32(bufI, bigEndian);
+
+  auto result = Result{
+      .version = version,
+      .creationTime = creationTime,
+      .modificationTime = modificationTime,
+      .timeScale = timeScale,
+      .duration = duration,
+      .preferredRate = preferredRate,
+      .preferredVolume = preferredVolume,
+      .matrixStructure = matrixStructure,
+      .previewTime = previewTime,
+      .previewDuration = previewDuration,
+      .posterTime = posterTime,
+      .selectionTime = selectionTime,
+      .selectionDuration = selectionDuration,
+      .currentTime = currentTime,
+      .nextTrackId = nextTrackId,
+  };
+#ifdef EXIV2_DEBUG_MESSAGES
+  std::cerr << "(mvhd) Parsed:\n"
+            << "  - version: " << (int)version << '\n'
+            << "  - creationTime: " << creationTime << '\n'
+            << "  - modificationTime: " << modificationTime << '\n'
+            << "  - timeScale: " << timeScale << '\n'
+            << "  - duration: " << duration << '\n'
+            << "  - preferredRate: " << preferredRate << '\n'
+            << "  - preferredVolume: " << preferredVolume << '\n'
+            << "  - matrixStructure: \n"
+            << "    " << matrixStructure[0] << ' ' << matrixStructure[1] << ' ' << matrixStructure[2] << '\n'
+            << "    " << matrixStructure[3] << ' ' << matrixStructure[4] << ' ' << matrixStructure[5] << '\n'
+            << "    " << matrixStructure[6] << ' ' << matrixStructure[7] << ' ' << matrixStructure[8] << '\n'
+            << "  - previewTime: " << previewTime << '\n'
+            << "  - previewDuration: " << previewDuration << '\n'
+            << "  - posterTime: " << posterTime << '\n'
+            << "  - selectionTime: " << selectionTime << '\n'
+            << "  - selectionDuration: " << selectionDuration << '\n'
+            << "  - currentTime: " << currentTime << '\n'
+            << "  - nextTrackId: " << nextTrackId << '\n';
+#endif
+  return result;
+}
+
+void populateXmp(Exiv2::XmpData& outXmp, const MovieHeaderBoxDecoder::Result& result) {
+  outXmp["Xmp.video.MovieHeaderVersion"] = (int)result.version;
+  outXmp["Xmp.video.DateUTC"] = result.creationTime;
+  outXmp["Xmp.video.ModificationDate"] = result.modificationTime;
+  outXmp["Xmp.video.TimeScale"] = result.timeScale;
+  outXmp["Xmp.video.Duration"] = (uint32_t)(result.duration.seconds() * 1000);
+  outXmp["Xmp.video.PreferredRate"] = result.preferredRate.toDouble();
+  outXmp["Xmp.video.PreferredVolume"] = result.preferredVolume.toDouble() * 100;
+  outXmp["Xmp.video.PreviewTime"] = result.previewTime;
+  outXmp["Xmp.video.PreviewDuration"] = (uint32_t)(result.previewDuration.seconds() * 1000);
+  outXmp["Xmp.video.PosterTime"] = result.posterTime;
+  outXmp["Xmp.video.SelectionTime"] = result.selectionTime;
+  outXmp["Xmp.video.SelectionDuration"] = (uint32_t)(result.selectionDuration.seconds() * 1000);
+  outXmp["Xmp.video.CurrentTime"] = result.currentTime;
+  outXmp["Xmp.video.NextTrackID"] = result.nextTrackId;
+}
+
+}  // namespace
