@@ -1868,7 +1868,7 @@ void populateXmp(Exiv2::XmpData& outXmp, const int currentStream, const TrackHea
     outXmp["Xmp.audio.TrackID"] = result.trackId;
     outXmp["Xmp.audio.TrackDuration"] = (uint32_t)(result.duration.seconds() * 1000);
     outXmp["Xmp.audio.TrackLayer"] = result.layer;
-    outXmp["Xmp.video.TrackVolume"] = result.volume.toDouble() * 100;
+    outXmp["Xmp.audio.TrackVolume"] = result.volume.toDouble() * 100;
   }
 }
 
