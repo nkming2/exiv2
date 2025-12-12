@@ -661,6 +661,8 @@ class TrackHeaderBoxDecoder {
 void populateXmp(Exiv2::XmpData& outXmp, const MovieHeaderBoxDecoder::Result& result);
 void populateXmp(Exiv2::XmpData& outXmp, const int currentStream, const TrackHeaderBoxDecoder::Result& result);
 
+double extractRotationFromMatrtix(const std::array<QTFixedPoint, 9>& mat);
+
 }  // namespace
 
 // provide more debug info during development/bug report
@@ -1861,6 +1863,7 @@ void populateXmp(Exiv2::XmpData& outXmp, const int currentStream, const TrackHea
     outXmp["Xmp.video.TrackVolume"] = result.volume.toDouble() * 100;
     outXmp["Xmp.video.Width"] = (uint32_t)result.trackWidth.toDouble();
     outXmp["Xmp.video.Height"] = (uint32_t)result.trackHeight.toDouble();
+    outXmp["Xmp.video.Rotation"] = (int)round(extractRotationFromMatrtix(result.matrixStructure));
   } else if (currentStream == Audio) {
     outXmp["Xmp.audio.TrackHeaderVersion"] = (int)result.version;
     outXmp["Xmp.audio.TrackCreateDate"] = result.creationTime;
@@ -1870,6 +1873,12 @@ void populateXmp(Exiv2::XmpData& outXmp, const int currentStream, const TrackHea
     outXmp["Xmp.audio.TrackLayer"] = result.layer;
     outXmp["Xmp.audio.TrackVolume"] = result.volume.toDouble() * 100;
   }
+}
+
+double extractRotationFromMatrtix(const std::array<QTFixedPoint, 9>& mat) {
+  auto rad = atan2(mat[3].toDouble(), mat[0].toDouble());
+  auto deg = rad * 180 / M_PI;
+  return deg;
 }
 
 }  // namespace
