@@ -1856,7 +1856,7 @@ void populateXmp(Exiv2::XmpData& outXmp, const int currentStream, const TrackHea
     outXmp["Xmp.video.TrackCreateDate"] = result.creationTime;
     outXmp["Xmp.video.TrackModifyDate"] = result.modificationTime;
     outXmp["Xmp.video.TrackID"] = result.trackId;
-    outXmp["Xmp.video.TrackDuration"] = (uint32_t)result.duration.seconds();
+    outXmp["Xmp.video.TrackDuration"] = (uint32_t)(result.duration.seconds() * 1000);
     outXmp["Xmp.video.TrackLayer"] = result.layer;
     outXmp["Xmp.video.TrackVolume"] = result.volume.toDouble() * 100;
     outXmp["Xmp.video.Width"] = (uint32_t)result.trackWidth.toDouble();
@@ -1866,7 +1866,7 @@ void populateXmp(Exiv2::XmpData& outXmp, const int currentStream, const TrackHea
     outXmp["Xmp.audio.TrackCreateDate"] = result.creationTime;
     outXmp["Xmp.audio.TrackModifyDate"] = result.modificationTime;
     outXmp["Xmp.audio.TrackID"] = result.trackId;
-    outXmp["Xmp.audio.TrackDuration"] = (uint32_t)result.duration.seconds();
+    outXmp["Xmp.audio.TrackDuration"] = (uint32_t)(result.duration.seconds() * 1000);
     outXmp["Xmp.audio.TrackLayer"] = result.layer;
     outXmp["Xmp.video.TrackVolume"] = result.volume.toDouble() * 100;
   }
