@@ -434,17 +434,6 @@ static constexpr TagDetails whiteBalance[] = {
     {0, "Auto"}, {1, "Daylight"}, {2, "Shade"}, {3, "Fluorescent"}, {4, "Tungsten"}, {5, "Manual"},
 };
 
-enum trackHeaderTags {
-  TrackHeaderVersion,
-  TrackCreateDate,
-  TrackModifyDate,
-  TrackID,
-  TrackDuration = 5,
-  TrackLayer = 8,
-  TrackVolume,
-  ImageWidth = 19,
-  ImageHeight
-};
 enum mediaHeaderTags {
   MediaHeaderVersion,
   MediaCreateDate,
@@ -624,7 +613,53 @@ class MovieHeaderBoxDecoder {
   Result operator()(const Exiv2::DataBuf& buf);
 };
 
+/*!
+  @brief Parse the content of the track header box ("tkhd")
+  @see https://developer.apple.com/documentation/quicktime-file-format/track_header_atom
+ */
+class TrackHeaderBoxDecoder {
+ public:
+  struct Result {
+    const uint8_t version;
+    //! These flags indicate how the track is used in the movie.
+    const uint32_t flags;
+    //! Indicates the creation calendar date and time for the track header. (in seconds since midnight, January 1, 1904)
+    const uint32_t creationTime;
+    //! Indicates the last change date for the track header. (in seconds since midnight, January 1, 1904)
+    const uint32_t modificationTime;
+    //! Uniquely identifies the track.
+    const uint32_t trackId;
+    //! Indicates the duration of this track. Note that this property is derived from the track’s edits. The value of
+    //! this field is equal to the sum of the durations of all of the track’s edits. If there is no edit list, then the
+    //! duration is the sum of the sample durations.
+    const QTScaledTime duration;
+    //! Indicates this track’s spatial priority in its movie. The QuickTime Movie Toolbox uses this value to determine
+    //! how tracks overlay one another. Tracks with lower layer values are displayed in front of tracks with higher
+    //! layer values.
+    const uint16_t layer;
+    //! Identifies a collection of movie tracks that contain alternate data for one another. This same identifier
+    //! appears in each 'tkhd' atom of the other tracks in the group.
+    const uint16_t alternateGroup;
+    //! Indicates how loudly to play this track’s sound.
+    const QTFixedPoint volume;
+    //! The matrix structure associated with this track.
+    const std::array<QTFixedPoint, 9> matrixStructure;
+    //! Specifies the width of this track in pixels.
+    const QTFixedPoint trackWidth;
+    //! Specifies the height of this track in pixels.
+    const QTFixedPoint trackHeight;
+  };
+
+  explicit TrackHeaderBoxDecoder(const uint32_t timeScale);
+
+  Result operator()(const Exiv2::DataBuf& buf);
+
+ private:
+  const uint32_t timeScale_;
+};
+
 void populateXmp(Exiv2::XmpData& outXmp, const MovieHeaderBoxDecoder::Result& result);
+void populateXmp(Exiv2::XmpData& outXmp, const int currentStream, const TrackHeaderBoxDecoder::Result& result);
 
 }  // namespace
 
@@ -764,8 +799,17 @@ void QuickTimeVideo::tagDecoder(Exiv2::DataBuf& buf, size_t size, size_t recursi
     timeScale_ = result.timeScale;
   }
 
-  else if (equalsQTimeTag(buf, "tkhd"))
-    trackHeaderDecoder(size);
+  else if (equalsQTimeTag(buf, "tkhd")) {
+    DataBuf tkhdBuf(size);
+    io_->readOrThrow(tkhdBuf.data(), size);
+    TrackHeaderBoxDecoder decoder(timeScale_);
+    const auto result = decoder(tkhdBuf);
+    populateXmp(xmpData_, currentStream_, result);
+    if (currentStream_ == Video) {
+      width_ = result.trackWidth.toDouble();
+      height_ = result.trackHeight.toDouble();
+    }
+  }
 
   else if (equalsQTimeTag(buf, "mdhd"))
     mediaHeaderDecoder(size);
@@ -1573,81 +1617,6 @@ void QuickTimeVideo::mediaHeaderDecoder(size_t size) {
   io_->readOrThrow(buf.data(), size % 4);
 }  // QuickTimeVideo::mediaHeaderDecoder
 
-void QuickTimeVideo::trackHeaderDecoder(size_t size) {
-  DataBuf buf(5);
-  std::memset(buf.data(), 0x0, buf.size());
-  buf.data()[4] = '\0';
-  int64_t temp = 0;
-
-  for (int i = 0; size / 4 != 0; size -= 4, i++) {
-    io_->readOrThrow(buf.data(), 4);
-
-    switch (i) {
-      case TrackHeaderVersion:
-        if (currentStream_ == Video)
-          xmpData_["Xmp.video.TrackHeaderVersion"] = static_cast<int>(buf.read_uint8(0));
-        else if (currentStream_ == Audio)
-          xmpData_["Xmp.audio.TrackHeaderVersion"] = static_cast<int>(buf.read_uint8(0));
-        break;
-      case TrackCreateDate:
-        // A 32-bit integer that specifies (in seconds since midnight, January 1, 1904) when the movie atom was created.
-        if (currentStream_ == Video)
-          xmpData_["Xmp.video.TrackCreateDate"] = buf.read_uint32(0, bigEndian);
-        else if (currentStream_ == Audio)
-          xmpData_["Xmp.audio.TrackCreateDate"] = buf.read_uint32(0, bigEndian);
-        break;
-      case TrackModifyDate:
-        // A 32-bit integer that specifies (in seconds since midnight, January 1, 1904) when the movie atom was created.
-        if (currentStream_ == Video)
-          xmpData_["Xmp.video.TrackModifyDate"] = buf.read_uint32(0, bigEndian);
-        else if (currentStream_ == Audio)
-          xmpData_["Xmp.audio.TrackModifyDate"] = buf.read_uint32(0, bigEndian);
-        break;
-      case TrackID:
-        if (currentStream_ == Video)
-          xmpData_["Xmp.video.TrackID"] = buf.read_uint32(0, bigEndian);
-        else if (currentStream_ == Audio)
-          xmpData_["Xmp.audio.TrackID"] = buf.read_uint32(0, bigEndian);
-        break;
-      case TrackDuration:
-        if (currentStream_ == Video)
-          xmpData_["Xmp.video.TrackDuration"] = timeScale_ ? buf.read_uint32(0, bigEndian) / timeScale_ : 0;
-        else if (currentStream_ == Audio)
-          xmpData_["Xmp.audio.TrackDuration"] = timeScale_ ? buf.read_uint32(0, bigEndian) / timeScale_ : 0;
-        break;
-      case TrackLayer:
-        if (currentStream_ == Video)
-          xmpData_["Xmp.video.TrackLayer"] = buf.read_uint16(0, bigEndian);
-        else if (currentStream_ == Audio)
-          xmpData_["Xmp.audio.TrackLayer"] = buf.read_uint16(0, bigEndian);
-        break;
-      case TrackVolume:
-        if (currentStream_ == Video)
-          xmpData_["Xmp.video.TrackVolume"] = (static_cast<int>(buf.read_uint8(0)) + (buf.data()[2] * 0.1)) * 100;
-        else if (currentStream_ == Audio)
-          xmpData_["Xmp.video.TrackVolume"] = (static_cast<int>(buf.read_uint8(0)) + (buf.data()[2] * 0.1)) * 100;
-        break;
-      case ImageWidth:
-        if (currentStream_ == Video) {
-          temp = buf.read_uint16(0, bigEndian) + static_cast<int64_t>((buf.data()[2] * 256 + buf.data()[3]) * 0.01);
-          xmpData_["Xmp.video.Width"] = temp;
-          width_ = temp;
-        }
-        break;
-      case ImageHeight:
-        if (currentStream_ == Video) {
-          temp = buf.read_uint16(0, bigEndian) + static_cast<int64_t>((buf.data()[2] * 256 + buf.data()[3]) * 0.01);
-          xmpData_["Xmp.video.Height"] = temp;
-          height_ = temp;
-        }
-        break;
-      default:
-        break;
-    }
-  }
-  io_->readOrThrow(buf.data(), size % 4);
-}  // QuickTimeVideo::trackHeaderDecoder
-
 Image::UniquePtr newQTimeInstance(BasicIo::UniquePtr io, bool /*create*/) {
   auto image = std::make_unique<QuickTimeVideo>(std::move(io));
   if (!image->good()) {
@@ -1782,6 +1751,87 @@ MovieHeaderBoxDecoder::Result MovieHeaderBoxDecoder::operator()(const Exiv2::Dat
   return result;
 }
 
+TrackHeaderBoxDecoder::TrackHeaderBoxDecoder(const uint32_t timeScale) : timeScale_(timeScale) {
+}
+
+TrackHeaderBoxDecoder::Result TrackHeaderBoxDecoder::operator()(const Exiv2::DataBuf& buf) {
+  using namespace Exiv2;
+  size_t bufI = 0;
+  ENFORCE_WITH_LOG(buf.size() >= 84, ErrorCode::kerCorruptedMetadata);
+  const auto version = buf.read_uint8(bufI);
+  const auto flags = buf.read_uint32(bufI, bigEndian) & 0xFFFFFF;
+  bufI += 4;
+  const auto creationTime = buf.read_uint32(bufI, bigEndian);
+  bufI += 4;
+  const auto modificationTime = buf.read_uint32(bufI, bigEndian);
+  bufI += 4;
+  const auto trackId = buf.read_uint32(bufI, bigEndian);
+  bufI += 4;
+  // reserved 4 bytes
+  bufI += 4;
+  const auto duration = QTScaledTime(buf.read_uint32(bufI, bigEndian), timeScale_);
+  bufI += 4;
+  // reserved 8 bytes
+  bufI += 8;
+  const auto layer = buf.read_uint16(bufI, bigEndian);
+  bufI += 2;
+  const auto alternateGroup = buf.read_uint16(bufI, bigEndian);
+  bufI += 2;
+  const auto volume = QTFixedPoint::fromQ88(buf.read_uint16(bufI, bigEndian));
+  bufI += 2;
+  // reserved 2 bytes
+  bufI += 2;
+  const std::array<QTFixedPoint, 9> matrixStructure = {
+      QTFixedPoint::fromQ1616(buf.read_uint32(bufI, bigEndian)),
+      QTFixedPoint::fromQ1616(buf.read_uint32(bufI += 4, bigEndian)),
+      QTFixedPoint::fromQ230(buf.read_uint32(bufI += 4, bigEndian)),
+      QTFixedPoint::fromQ1616(buf.read_uint32(bufI += 4, bigEndian)),
+      QTFixedPoint::fromQ1616(buf.read_uint32(bufI += 4, bigEndian)),
+      QTFixedPoint::fromQ230(buf.read_uint32(bufI += 4, bigEndian)),
+      QTFixedPoint::fromQ1616(buf.read_uint32(bufI += 4, bigEndian)),
+      QTFixedPoint::fromQ1616(buf.read_uint32(bufI += 4, bigEndian)),
+      QTFixedPoint::fromQ230(buf.read_uint32(bufI += 4, bigEndian)),
+  };
+  bufI += 4;
+  const auto trackWidth = QTFixedPoint::fromQ1616(buf.read_uint32(bufI, bigEndian));
+  bufI += 4;
+  const auto trackHeight = QTFixedPoint::fromQ1616(buf.read_uint32(bufI, bigEndian));
+
+  auto result = Result{
+      .version = version,
+      .flags = flags,
+      .creationTime = creationTime,
+      .modificationTime = modificationTime,
+      .trackId = trackId,
+      .duration = duration,
+      .layer = layer,
+      .alternateGroup = alternateGroup,
+      .volume = volume,
+      .matrixStructure = matrixStructure,
+      .trackWidth = trackWidth,
+      .trackHeight = trackHeight,
+  };
+#ifdef EXIV2_DEBUG_MESSAGES
+  std::cerr << "(tkhd) Parsed:\n"
+            << "  - version: " << (int)version << '\n'
+            << "  - flags: " << flags << '\n'
+            << "  - creationTime: " << creationTime << '\n'
+            << "  - modificationTime: " << modificationTime << '\n'
+            << "  - trackId: " << trackId << '\n'
+            << "  - duration: " << duration << '\n'
+            << "  - layer: " << layer << '\n'
+            << "  - alternateGroup: " << alternateGroup << '\n'
+            << "  - volume: " << volume << '\n'
+            << "  - matrixStructure: \n"
+            << "    " << matrixStructure[0] << ' ' << matrixStructure[1] << ' ' << matrixStructure[2] << '\n'
+            << "    " << matrixStructure[3] << ' ' << matrixStructure[4] << ' ' << matrixStructure[5] << '\n'
+            << "    " << matrixStructure[6] << ' ' << matrixStructure[7] << ' ' << matrixStructure[8] << '\n'
+            << "  - trackWidth: " << trackWidth << '\n'
+            << "  - trackHeight: " << trackHeight << '\n';
+#endif
+  return result;
+}
+
 void populateXmp(Exiv2::XmpData& outXmp, const MovieHeaderBoxDecoder::Result& result) {
   outXmp["Xmp.video.MovieHeaderVersion"] = (int)result.version;
   outXmp["Xmp.video.DateUTC"] = result.creationTime;
@@ -1797,6 +1847,29 @@ void populateXmp(Exiv2::XmpData& outXmp, const MovieHeaderBoxDecoder::Result& re
   outXmp["Xmp.video.SelectionDuration"] = (uint32_t)(result.selectionDuration.seconds() * 1000);
   outXmp["Xmp.video.CurrentTime"] = result.currentTime;
   outXmp["Xmp.video.NextTrackID"] = result.nextTrackId;
+}
+
+void populateXmp(Exiv2::XmpData& outXmp, const int currentStream, const TrackHeaderBoxDecoder::Result& result) {
+  using namespace Exiv2::Internal;
+  if (currentStream == Video) {
+    outXmp["Xmp.video.TrackHeaderVersion"] = (int)result.version;
+    outXmp["Xmp.video.TrackCreateDate"] = result.creationTime;
+    outXmp["Xmp.video.TrackModifyDate"] = result.modificationTime;
+    outXmp["Xmp.video.TrackID"] = result.trackId;
+    outXmp["Xmp.video.TrackDuration"] = (uint32_t)result.duration.seconds();
+    outXmp["Xmp.video.TrackLayer"] = result.layer;
+    outXmp["Xmp.video.TrackVolume"] = result.volume.toDouble() * 100;
+    outXmp["Xmp.video.Width"] = (uint32_t)result.trackWidth.toDouble();
+    outXmp["Xmp.video.Height"] = (uint32_t)result.trackHeight.toDouble();
+  } else if (currentStream == Audio) {
+    outXmp["Xmp.audio.TrackHeaderVersion"] = (int)result.version;
+    outXmp["Xmp.audio.TrackCreateDate"] = result.creationTime;
+    outXmp["Xmp.audio.TrackModifyDate"] = result.modificationTime;
+    outXmp["Xmp.audio.TrackID"] = result.trackId;
+    outXmp["Xmp.audio.TrackDuration"] = (uint32_t)result.duration.seconds();
+    outXmp["Xmp.audio.TrackLayer"] = result.layer;
+    outXmp["Xmp.video.TrackVolume"] = result.volume.toDouble() * 100;
+  }
 }
 
 }  // namespace
