@@ -728,7 +728,8 @@ using namespace Exiv2::Internal;
 
 QuickTimeVideo::QuickTimeVideo(BasicIo::UniquePtr io, size_t max_recursion_depth) :
     Image(ImageType::qtime, mdNone, std::move(io)),
-    timeScale_(1),
+    mvhdTimeScale_(1),
+    mdhdTimeScale_(1),
     currentStream_(Null),
     max_recursion_depth_(max_recursion_depth) {
 }  // QuickTimeVideo::QuickTimeVideo
@@ -842,13 +843,13 @@ void QuickTimeVideo::tagDecoder(Exiv2::DataBuf& buf, size_t size, size_t recursi
     MovieHeaderBoxDecoder decoder;
     const auto result = decoder(mvhdBuf);
     populateXmp(xmpData_, result);
-    timeScale_ = result.timeScale;
+    mvhdTimeScale_ = result.timeScale;
   }
 
   else if (equalsQTimeTag(buf, "tkhd")) {
     DataBuf tkhdBuf(size);
     io_->readOrThrow(tkhdBuf.data(), size);
-    TrackHeaderBoxDecoder decoder(timeScale_);
+    TrackHeaderBoxDecoder decoder(mvhdTimeScale_);
     const auto result = decoder(tkhdBuf);
     populateXmp(xmpData_, currentStream_, result);
     if (currentStream_ == Video) {
@@ -1383,7 +1384,7 @@ void QuickTimeVideo::timeToSampleDecoder() {
     if (timeOfFrames == 0)
       timeOfFrames = 1;
     xmpData_["Xmp.video.FrameRate"] =
-        static_cast<double>(totalframes) * static_cast<double>(timeScale_) / static_cast<double>(timeOfFrames);
+        static_cast<double>(totalframes) * static_cast<double>(mdhdTimeScale_) / static_cast<double>(timeOfFrames);
   }
 }  // QuickTimeVideo::timeToSampleDecoder
 
@@ -1650,6 +1651,7 @@ void QuickTimeVideo::mediaHeaderDecoder(size_t size) {
         time_scale = buf.read_uint32(0, bigEndian);
         if (time_scale <= 0)
           time_scale = 1;
+        mdhdTimeScale_ = time_scale;
         break;
       case MediaDuration:
         if (currentStream_ == Video)
