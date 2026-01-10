@@ -774,10 +774,20 @@ void QuickTimeVideo::decodeBlock(size_t recursion_depth, std::string const& ente
   uint64_t size = 0;
   buf.data()[4] = '\0';
 
-  io_->read(buf.data(), 4);
-  if (io_->eof()) {
-    continueTraversing_ = false;
-    return;
+  try {
+    io_->read(buf.data(), 4);
+    if (io_->eof()) {
+      continueTraversing_ = false;
+      return;
+    }
+  } catch (const Error& err) {
+    if (err.code() == ErrorCode::kerOffsetOutOfRange) {
+      // eof
+      continueTraversing_ = false;
+      return;
+    } else {
+      throw;
+    }
   }
 
   size = buf.read_uint32(0, bigEndian);
