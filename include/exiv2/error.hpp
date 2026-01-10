@@ -16,7 +16,10 @@
 
 #include <exception>  // for exception
 #include <sstream>    // for operator<<, ostream, ostringstream, bas...
-#include <string>     // for basic_string, string
+#if __has_include(<stacktrace>)
+#include <stacktrace>
+#endif
+#include <string>  // for basic_string, string
 
 // *****************************************************************************
 // namespace extensions
@@ -240,14 +243,28 @@ class EXIV2API Error : public std::exception {
 
   //! Constructor taking an error code and one argument
   template <typename A>
-  Error(ErrorCode code, const A& arg1) : code_(code), arg1_(toBasicString<char>(arg1)) {
+  Error(ErrorCode code, const A& arg1) :
+      code_(code),
+      arg1_(toBasicString<char>(arg1))
+#if __cpp_lib_stacktrace
+      ,
+      stacktrace_(std::stacktrace::current())
+#endif
+  {
     setMsg(1);
   }
 
   //! Constructor taking an error code and two arguments
   template <typename A, typename B>
   Error(ErrorCode code, const A& arg1, const B& arg2) :
-      code_(code), arg1_(toBasicString<char>(arg1)), arg2_(toBasicString<char>(arg2)) {
+      code_(code),
+      arg1_(toBasicString<char>(arg1)),
+      arg2_(toBasicString<char>(arg2))
+#if __cpp_lib_stacktrace
+      ,
+      stacktrace_(std::stacktrace::current())
+#endif
+  {
     setMsg(2);
   }
 
@@ -257,7 +274,12 @@ class EXIV2API Error : public std::exception {
       code_(code),
       arg1_(toBasicString<char>(arg1)),
       arg2_(toBasicString<char>(arg2)),
-      arg3_(toBasicString<char>(arg3)) {
+      arg3_(toBasicString<char>(arg3))
+#if __cpp_lib_stacktrace
+      ,
+      stacktrace_(std::stacktrace::current())
+#endif
+  {
     setMsg(3);
   }
 
@@ -284,6 +306,9 @@ class EXIV2API Error : public std::exception {
   std::string arg2_;  //!< Second argument
   std::string arg3_;  //!< Third argument
   std::string msg_;   //!< Complete error message
+#if __cpp_lib_stacktrace
+  std::stacktrace stacktrace_;
+#endif
 };
 
 //! %Error output operator

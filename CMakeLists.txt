@@ -16,6 +16,7 @@ project(
   DESCRIPTION "Exif/IPTC/Xmp C++ metadata library and tools plus ICC Profiles, Previews and more."
   LANGUAGES C CXX
 )
+set(CMAKE_CXX_STANDARD 23)
 
 # Shared Object versioning (SemVer-like: must bump major on API breakage)
 if(PROJECT_VERSION_MAJOR EQUAL 0)

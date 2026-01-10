@@ -6,7 +6,9 @@
 
 // + standard includes
 #include <array>
+#include <ios>
 #include <iostream>
+#include <sstream>
 
 namespace {
 //! Complete list of Exiv2 exception error messages
@@ -150,7 +152,13 @@ void LogMsg::defaultHandler(int level, const char* s) {
   std::cerr << s;
 }
 
-Error::Error(ErrorCode code) : code_(code) {
+Error::Error(ErrorCode code) :
+    code_(code)
+#if __cpp_lib_stacktrace
+    ,
+    stacktrace_(std::stacktrace::current())
+#endif
+{
   setMsg(0);
 }
 
@@ -186,7 +194,13 @@ void Error::setMsg(int count) {
       msg.replace(pos, 2, arg3_);
     }
   }
+#if __cpp_lib_stacktrace
+  std::stringstream ss(msg, std::ios_base::ate | std::ios_base::out);
+  ss << '\n' << stacktrace_;
+  msg_ = ss.str();
+#else
   msg_ = std::move(msg);
+#endif
 }
 
 }  // namespace Exiv2
