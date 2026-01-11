@@ -978,7 +978,7 @@ class RemoteIo::Impl {
   // DATA
   std::string path_;                                //!< (Standard) path
   size_t blockSize_;                                //!< Size of the block memory.
-  size_t nBlock_;                                   //!< Number of allocated blocks
+  size_t nBlock_{0};                                //!< Number of allocated blocks
   std::unique_ptr<BlockMap[]> blocksMap_;           //!< An array contains all blocksMap
   size_t size_{0};                                  //!< The file size
   size_t idx_{0};                                   //!< Index into the memory area
