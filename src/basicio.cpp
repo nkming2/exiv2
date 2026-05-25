@@ -1567,6 +1567,7 @@ int64_t CurlIo::CurlImpl::getFileLength() const {
   if (headers) {
     curl_easy_setopt(curl_.get(), CURLOPT_HTTPHEADER, headers.get());
   }
+  curl_easy_setopt(curl_.get(), CURLOPT_FOLLOWLOCATION, CURLFOLLOW_ALL);
   // curl_easy_setopt(curl_.get(), CURLOPT_VERBOSE, 1); // debugging mode
 
   /* Perform the request, res will get the return code */
@@ -1598,6 +1599,7 @@ void CurlIo::CurlImpl::getDataByRange(size_t lowBlock, size_t highBlock, std::st
   if (headers) {
     curl_easy_setopt(curl_.get(), CURLOPT_HTTPHEADER, headers.get());
   }
+  curl_easy_setopt(curl_.get(), CURLOPT_FOLLOWLOCATION, CURLFOLLOW_ALL);
 
   // curl_easy_setopt(curl_.get(), CURLOPT_VERBOSE, 1); // debugging mode
 
@@ -1643,6 +1645,7 @@ void CurlIo::CurlImpl::writeRemote(const byte* data, size_t size, size_t from, s
   if (headers) {
     curl_easy_setopt(curl_.get(), CURLOPT_HTTPHEADER, headers.get());
   }
+  curl_easy_setopt(curl_.get(), CURLOPT_FOLLOWLOCATION, CURLFOLLOW_ALL);
 
   // encode base64
   size_t encodeLength = (((size + 2) / 3) * 4) + 1;
